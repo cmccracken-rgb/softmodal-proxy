@@ -1,10 +1,18 @@
-import { getSessionCookie } from './auth.js';
+import fetch from 'node-fetch';
+
+const BASE_URL = 'https://softmodal.com';
 
 export async function fetchQuote({ origin, destination, size = 53 }) {
-  const cookie = await getSessionCookie();
+  const cookie = process.env.SOFTMODAL_COOKIE;
+
+  if (!cookie) {
+    throw new Error('Missing SOFTMODAL_COOKIE env var');
+  }
+
+  const url = `${BASE_URL}/rates/dtd`;
 
   const params = new URLSearchParams({
-    request_id: Math.random().toString(36).substring(2, 9),
+    request_id: Math.random().toString(36).substring(2, 8),
     truck_mode: 'van',
     tarps: 'false',
     dray_date: '18',
@@ -30,28 +38,32 @@ export async function fetchQuote({ origin, destination, size = 53 }) {
     mileage_routing: 'practical',
     tipe: 'imc',
     add_dray_rate: '1',
+    s28: '',
     origin,
     destination,
     size: String(size),
     _: Date.now().toString(),
   });
 
-  const url = `https://softmodal.com/rates/dtd?${params.toString()}`;
+  const fullUrl = `${url}?${params.toString()}`;
 
-  const res = await fetch(url, {
+  const res = await fetch(fullUrl, {
     method: 'GET',
     headers: {
-      Cookie: cookie,
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
       Accept: '*/*',
       Referer: 'https://softmodal.com/dist/',
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/146 Safari/537.36',
+      Cookie: cookie,
     },
   });
 
   if (!res.ok) {
-    throw new Error(`Softmodal request failed: ${res.status}`);
+    const text = await res.text();
+    throw new Error(`Softmodal error ${res.status}: ${text}`);
   }
 
-  return await res.json();
+  const data = await res.json();
+
+  return data;
 }
