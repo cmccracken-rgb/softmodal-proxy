@@ -47,7 +47,7 @@ async function softmodalFetch(path, params, session) {
 }
 
 // 🚀 MAIN FUNCTION
-export async function getSoftmodalQuote({
+export async function fetchQuote({
   origin,
   destination,
   size = 53,
