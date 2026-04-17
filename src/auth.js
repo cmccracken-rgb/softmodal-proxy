@@ -35,26 +35,26 @@ async function loginAndExtractCookie() {
 
     const page = await context.newPage();
 
-   await page.goto(LOGIN_URL, {
+await page.goto(LOGIN_URL, {
   waitUntil: 'domcontentloaded',
   timeout: 30000,
 });
 
-// click login button to reveal form
-await page.click(LOGIN_SELECTORS.openLogin).catch(() => {});
+// 🔥 click the TOP RIGHT login button (important)
+await page.click('text=LOG IN');
 
-// ✅ wait for BOTH fields to be visible (important)
-await page.waitForSelector('#email', { state: 'visible', timeout: 10000 });
-await page.waitForSelector('#password', { state: 'visible', timeout: 10000 });
+// wait for fields (they appear instantly but still wait safely)
+await page.waitForSelector('#email', { timeout: 10000 });
+await page.waitForSelector('#password', { timeout: 10000 });
 
 // fill form
 await page.fill('#email', email);
 await page.fill('#password', password);
 
-// submit
+// submit (this is the button inside the popup)
 await Promise.all([
   page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {}),
-  page.click(LOGIN_SELECTORS.submit),
+  page.click('button:has-text("Log in")'),
 ]);
 
     await page.waitForTimeout(2000);
