@@ -15,9 +15,14 @@ app.get('/quote', async (req, res) => {
 
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+  console.error('FULL ERROR:', err);
+  console.error('STACK:', err.stack);
+
+  res.status(500).json({
+    error: err.message,
+    stack: err.stack,   // 👈 TEMP add this
+  });
+}
 
 app.listen(3000, () => {
   console.log('Server running');
