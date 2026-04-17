@@ -1,74 +1,5 @@
-import { chromium } from 'playwright';
+import { getSessionCookie } from './auth.js';
 
-const LOGIN_URL =
-  process.env.SOFTMODAL_LOGIN_URL ||
-  'https://readonly.softmodal.com/sessions/login';
-
-const COOKIE_TTL_MS = 25 * 60 * 1000;
-
-let cachedCookie = null;
-let cachedAt = 0;
-let inFlight = null;
-
-async function loginAndGetCookie() {
-  const email = process.env.SOFTMODAL_EMAIL;
-  const password = process.env.SOFTMODAL_PASSWORD;
-
-  if (!email || !password) {
-    throw new Error('Missing Softmodal credentials');
-  }
-
-  const browser = await chromium.launch({ headless: true });
-
-  try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
-
-    // fill login form
-    await page.fill('input[name="email"]', email);
-    await page.fill('input[name="password"]', password);
-
-    await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle' }),
-      page.click('button[type="submit"]'),
-    ]);
-
-    const cookies = await context.cookies();
-
-    const session = cookies.find((c) => c.name === 'rack.session');
-
-    if (!session) {
-      throw new Error('No rack.session cookie found');
-    }
-
-    return `rack.session=${session.value}`;
-  } finally {
-    await browser.close();
-  }
-}
-
-async function getSessionCookie() {
-  const fresh = cachedCookie && Date.now() - cachedAt < COOKIE_TTL_MS;
-  if (fresh) return cachedCookie;
-
-  if (!inFlight) {
-    inFlight = loginAndGetCookie()
-      .then((cookie) => {
-        cachedCookie = cookie;
-        cachedAt = Date.now();
-        return cookie;
-      })
-      .finally(() => {
-        inFlight = null;
-      });
-  }
-
-  return inFlight;
-}
-
-// 🔥 THIS IS THE IMPORTANT PART
 export async function fetchQuote({ origin, destination, size = 53 }) {
   const cookie = await getSessionCookie();
 
@@ -111,10 +42,10 @@ export async function fetchQuote({ origin, destination, size = 53 }) {
     method: 'GET',
     headers: {
       Cookie: cookie,
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/146 Safari/537.36',
       Accept: '*/*',
       Referer: 'https://softmodal.com/dist/',
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/146 Safari/537.36',
     },
   });
 
@@ -122,7 +53,5 @@ export async function fetchQuote({ origin, destination, size = 53 }) {
     throw new Error(`Softmodal request failed: ${res.status}`);
   }
 
-  const data = await res.json();
-
-  return data;
+  return await res.json();
 }
