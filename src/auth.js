@@ -1,17 +1,10 @@
-import { chromium } from 'playwright';
+import fetch from 'node-fetch';
 
 const LOGIN_URL =
   process.env.SOFTMODAL_LOGIN_URL ||
   'https://readonly.softmodal.com/sessions/login';
 
-const COOKIE_TTL_MS = 25 * 60 * 1000; // ~25 minutes
-
-const LOGIN_SELECTORS = {
-  openLogin: 'text=Log in', // button that reveals form
-  email: '#email',
-  password: '#password',
-  submit: 'button[type="submit"]',
-};
+const COOKIE_TTL_MS = 25 * 60 * 1000;
 
 let cachedCookie = null;
 let cachedAt = 0;
@@ -22,54 +15,49 @@ async function loginAndExtractCookie() {
   const password = process.env.SOFTMODAL_PASSWORD;
 
   if (!email || !password) {
-    throw new Error('Missing SOFTMODAL_EMAIL or SOFTMODAL_PASSWORD env var');
+    throw new Error('Missing SOFTMODAL_EMAIL or SOFTMODAL_PASSWORD');
   }
 
-  const browser = await chromium.launch({ headless: true });
+  // Step 1: get CSRF token + cookies
+  const loginPage = await fetch(LOGIN_URL, {
+    method: 'GET',
+  });
 
-  try {
-    const context = await browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    });
+  const html = await loginPage.text();
 
-    const page = await context.newPage();
-
-await page.goto(LOGIN_URL, {
-  waitUntil: 'domcontentloaded',
-  timeout: 30000,
-});
-
-// 🔥 click the TOP RIGHT login button (important)
-await page.click('text=LOG IN');
-
-// wait for fields (they appear instantly but still wait safely)
-await page.waitForSelector('#email', { timeout: 10000 });
-await page.waitForSelector('#password', { timeout: 10000 });
-
-// fill form
-await page.fill('#email', email);
-await page.fill('#password', password);
-
-// submit (this is the button inside the popup)
-await Promise.all([
-  page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {}),
-  page.click('button:has-text("Log in")'),
-]);
-
-    await page.waitForTimeout(2000);
-
-    const cookies = await context.cookies();
-    const session = cookies.find((c) => c.name === 'rack.session');
-
-    if (!session) {
-      throw new Error('Login failed: rack.session cookie not found');
-    }
-
-    return `rack.session=${session.value}`;
-  } finally {
-    await browser.close().catch(() => {});
+  const csrfMatch = html.match(/name="authenticity_token" value="([^"]+)"/);
+  if (!csrfMatch) {
+    throw new Error('Could not find CSRF token');
   }
+
+  const csrfToken = csrfMatch[1];
+
+  const cookies = loginPage.headers.raw()['set-cookie'] || [];
+  const cookieHeader = cookies.map(c => c.split(';')[0]).join('; ');
+
+  // Step 2: submit login
+  const res = await fetch(LOGIN_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Cookie': cookieHeader,
+    },
+    body: new URLSearchParams({
+      'email': email,
+      'password': password,
+      'authenticity_token': csrfToken,
+    }),
+    redirect: 'manual',
+  });
+
+  const setCookies = res.headers.raw()['set-cookie'] || [];
+  const session = setCookies.find(c => c.includes('rack.session'));
+
+  if (!session) {
+    throw new Error('Login failed: no session cookie returned');
+  }
+
+  return session.split(';')[0];
 }
 
 export async function getSessionCookie({ forceRefresh = false } = {}) {
