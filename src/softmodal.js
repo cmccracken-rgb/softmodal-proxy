@@ -1,23 +1,13 @@
-import fetch from 'node-fetch';
-
 const BASE_URL = 'https://softmodal.com';
 
-export async function fetchQuote({ origin, destination, size = 53 }) {
-  const cookie = process.env.SOFTMODAL_COOKIE;
-
-  if (!cookie) {
-    throw new Error('Missing SOFTMODAL_COOKIE env var');
-  }
-
-  const url = `${BASE_URL}/rates/dtd`;
-
-  const params = new URLSearchParams({
-    request_id: Math.random().toString(36).substring(2, 8),
+function buildParams({ origin, destination, size }) {
+  return new URLSearchParams({
+    request_id: Math.random().toString(36).slice(2, 8),
     truck_mode: 'van',
     tarps: 'false',
     dray_date: '18',
     hybrid_rates: '0',
-    valid: new Date().toISOString().split('T')[0],
+    valid: new Date().toISOString().slice(0, 10),
     restricted: 'false',
     o_stay: 'true',
     o_drop: 'true',
@@ -41,13 +31,32 @@ export async function fetchQuote({ origin, destination, size = 53 }) {
     s28: '',
     origin,
     destination,
-    size: String(size),
+    size: String(size ?? 53),
     _: Date.now().toString(),
   });
+}
 
-  const fullUrl = `${url}?${params.toString()}`;
+function cleanCookie(raw) {
+  if (!raw) return '';
+  // remove URL-encoded newlines and any actual newlines
+  return raw.replace(/%0A/gi, '').replace(/\r?\n/g, '').trim();
+}
 
-  const res = await fetch(fullUrl, {
+export async function fetchQuote({ origin, destination, size = 53 }) {
+  if (!origin || !destination) {
+    throw new Error('origin and destination are required');
+  }
+
+  const rawCookie = process.env.SOFTMODAL_COOKIE;
+  const cookie = cleanCookie(rawCookie);
+
+  if (!cookie || !cookie.startsWith('rack.session=')) {
+    throw new Error('Invalid or missing SOFTMODAL_COOKIE (must start with rack.session=...)');
+  }
+
+  const url = `${BASE_URL}/rates/dtd?${buildParams({ origin, destination, size }).toString()}`;
+
+  const res = await fetch(url, {
     method: 'GET',
     headers: {
       'User-Agent':
@@ -58,12 +67,17 @@ export async function fetchQuote({ origin, destination, size = 53 }) {
     },
   });
 
+  // Capture body once (for both error + success)
+  const text = await res.text();
+
   if (!res.ok) {
-    const text = await res.text();
     throw new Error(`Softmodal error ${res.status}: ${text}`);
   }
 
-  const data = await res.json();
-
-  return data;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    // Sometimes APIs return HTML on auth failure — surface it clearly
+    throw new Error(`Invalid JSON from Softmodal: ${text.slice(0, 300)}`);
+  }
 }
