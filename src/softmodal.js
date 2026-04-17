@@ -38,24 +38,45 @@ async function authedJson(path, { retried = false } = {}) {
   }
 }
 
-// ─── Query builder ───────────────────────────────────────────────────────────
+// ─── Query builders ──────────────────────────────────────────────────────────
 
-function laneQS({ origin, destination, size }) {
+// Shared params used by truck and driving endpoints
+function commonParams({ origin, destination, size }) {
   return new URLSearchParams({
+    truck_mode: 'van',
+    tarps: 'false',
+    dray_date: '18',
+    hybrid_rates: '0',
+    valid: new Date().toISOString().split('T')[0],
+    restricted: 'false',
+    o_stay: 'true',
+    o_drop: 'true',
+    o_oneway: 'true',
+    d_stay: 'true',
+    d_drop: 'true',
+    d_oneway: 'true',
+    o_stop: 'false',
+    d_stop: 'false',
+    priv: 'false',
+    empty: 'false',
+    hazardous: 'false',
+    embargoed: '30',
+    o_days: '2',
+    d_days: '2',
+    placeholder: '0',
+    dray_rate_flag: '5',
+    mileage_routing: 'practical',
+    tipe: 'imc',
+    add_dray_rate: '1',
+    s28: '',
     origin,
     destination,
     size: String(size),
-    truck_mode: 'van',
-    tarps: 'false',
-    mileage_routing: 'practical',
   }).toString();
 }
 
-function dtdQS({ origin, destination, size }) {
+function dtdParams({ origin, destination, size }) {
   return new URLSearchParams({
-    origin,
-    destination,
-    size: String(size),
     truck_mode: 'van',
     tarps: 'false',
     mileage_routing: 'practical',
@@ -78,17 +99,16 @@ function dtdQS({ origin, destination, size }) {
     priv: 'false',
     valid: new Date().toISOString().split('T')[0],
     _: Date.now().toString(),
+    origin,
+    destination,
+    size: String(size),
   }).toString();
 }
 
-// ─── Streaming response parser ───────────────────────────────────────────────
-// Softmodal flushes multiple JSON objects back-to-back as rail carriers respond:
-//   {"results":[...]}{"results":[...]}{"results":[...]}
-// We split on brace depth, parse each chunk, and deduplicate by vendor id,
-// keeping the lowest rate seen across all chunks.
+// ─── Streaming DTD response parser ───────────────────────────────────────────
 
 function parseStreamedDTD(text) {
-  const best = new Map(); // vendor id → item
+  const best = new Map();
 
   let depth = 0, start = -1;
   for (let i = 0; i < text.length; i++) {
@@ -106,8 +126,6 @@ function parseStreamedDTD(text) {
         for (const item of items) {
           const id = item?.vendor?.id;
           if (!id) continue;
-          // Keep this vendor's entry; prefer lower total, but always prefer a
-          // non-error entry over an error entry.
           const existing = best.get(id);
           const hasRate = item.total > 0 && !item.error;
           const existingHasRate = existing && existing.total > 0 && !existing.error;
@@ -122,9 +140,7 @@ function parseStreamedDTD(text) {
   return [...best.values()];
 }
 
-// ─── Provider formatter ──────────────────────────────────────────────────────
-// Returns a provider object for EVERY vendor (including no-rate ones) so
-// Lovable can show the full log panel matching what Softmodal shows.
+// ─── Provider formatter ───────────────────────────────────────────────────────
 
 function safeJson(str) {
   if (typeof str !== 'string' || !str) return null;
@@ -136,19 +152,13 @@ function formatProvider(item) {
   const hasRate = item.total > 0 && !item.error;
 
   if (!hasRate) {
-    return {
-      name,
-      rate: null,
-      range: null,
-      available: false,
-      error: item.error || 'No rate',
-    };
+    return { name, rate: null, range: null, available: false, error: item.error || 'No rate' };
   }
 
   const base = { name, rate: Math.round(item.total), range: null, available: true, error: null };
   const actual = safeJson(item.actual);
 
-  // Triple Crown — actual: { success, equipSize, payload: [{ prices: [{ totalCharge, available }] }] }
+  // Triple Crown — { success, payload: [{ prices: [{ totalCharge, available }] }] }
   if (actual?.success !== undefined && actual?.payload) {
     const prices = actual.payload[0]?.prices ?? [];
     const available = prices.filter((p) => p.available).map((p) => Math.round(p.totalCharge));
@@ -158,19 +168,15 @@ function formatProvider(item) {
     return base;
   }
 
-  // Loup — actual: [{ totalPrice: { amount }, capacityAvailable }]
+  // Loup — [{ totalPrice: { amount }, capacityAvailable, estimatedTransitDays }]
   if (Array.isArray(actual) && actual[0]?.totalPrice) {
-    const amounts = actual
-      .filter((p) => p.capacityAvailable)
-      .map((p) => p.totalPrice.amount);
-    if (amounts.length > 0) {
-      base.range = { min: Math.min(...amounts), max: Math.max(...amounts) };
-    }
+    const amounts = actual.filter((p) => p.capacityAvailable).map((p) => p.totalPrice.amount);
+    if (amounts.length > 0) base.range = { min: Math.min(...amounts), max: Math.max(...amounts) };
     base.transitDays = actual[0]?.estimatedTransitDays ?? null;
     return base;
   }
 
-  // CSX — actual: { Price, TransitTime, QuoteReferenceNumber, ... }
+  // CSX — { Price, TransitTime, QuoteReferenceNumber }
   if (actual?.Price !== undefined) {
     base.transitDays = actual.TransitTime ?? null;
     base.quoteRef = actual.QuoteReferenceNumber ?? null;
@@ -180,81 +186,73 @@ function formatProvider(item) {
   return base;
 }
 
-// ─── Truck rate ──────────────────────────────────────────────────────────────
-// The /truck endpoint returns a simple JSON object.
-// The rate lives at different paths depending on Softmodal's response shape.
+// ─── Truck rate ───────────────────────────────────────────────────────────────
+// /rates/truck returns RPM (rate per mile): { rates: [{ name, rpm }] }
+// /driving returns mileage:                { miles: 721, ... }
+// Truck rate = Static Average rpm × miles
 
-function extractTruckRate(data) {
-  if (!data || data.raw) return null; // failed / HTML response
-  // Try common paths
-  const candidates = [
-    data?.rate,
-    data?.truck,
-    data?.total,
-    data?.rates?.[0]?.rate,
-    data?.rates?.[0]?.total,
-    data?.price,
-  ];
-  for (const v of candidates) {
-    const n = Number(v);
-    if (Number.isFinite(n) && n > 0) return Math.round(n);
-  }
-  return null;
-}
+async function fetchTruckRate({ origin, destination, size }) {
+  const qs = commonParams({ origin, destination, size });
 
-// ─── Main export ─────────────────────────────────────────────────────────────
-
-/**
- * Fetch all rates for a lane and return a clean object for Lovable.
- *
- * Response shape:
- * {
- *   origin, destination, size,
- *   intermodal: 1669.89,   // lowest DTD total (null if none)
- *   truck: 1557.36,        // truck rate (null if unavailable)
- *   providers: [
- *     { name, rate, range, available, error, transitDays?, quoteRef? },
- *     ...
- *   ]
- * }
- */
-export async function fetchQuote({ origin, destination, size = '53' }) {
-  console.log('[softmodal] fetchQuote', { origin, destination, size });
-
-  const qs = laneQS({ origin, destination, size });
-  const dqs = dtdQS({ origin, destination, size });
-
-  // Fire DTD (streaming) and truck in parallel
-  const [dtdText, truckData] = await Promise.all([
-    authedText(`/rates/dtd?${dqs}`).catch((e) => {
-      console.error('[softmodal] DTD error:', e.message);
-      return '';
+  const [truckData, drivingData] = await Promise.all([
+    authedJson(`/rates/truck?${qs}`).catch((e) => {
+      console.error('[softmodal] /rates/truck error:', e.message);
+      return null;
     }),
-    authedJson(`/truck?${qs}`).catch((e) => {
-      console.error('[softmodal] truck error:', e.message);
+    authedJson(`/driving?${qs}`).catch((e) => {
+      console.error('[softmodal] /driving error:', e.message);
       return null;
     }),
   ]);
 
+  console.log('[softmodal] truck raw:', JSON.stringify(truckData));
+  console.log('[softmodal] driving raw:', JSON.stringify(drivingData));
+
+  const rates = truckData?.rates;
+  if (!Array.isArray(rates)) return null;
+
+  // Find Static Average RPM
+  const avgEntry = rates.find((r) => r.name === 'Static Average');
+  const rpm = avgEntry?.rpm ?? null;
+  if (!rpm) return null;
+
+  // Get miles from driving endpoint
+  const miles = drivingData?.miles ?? drivingData?.distance ?? drivingData?.mileage ?? null;
+  if (!miles) {
+    console.warn('[softmodal] No miles found in driving response, cannot compute truck rate');
+    return null;
+  }
+
+  const truckRate = Math.round(rpm * miles);
+  console.log(`[softmodal] truck rate: ${rpm} rpm × ${miles} miles = $${truckRate}`);
+  return truckRate;
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+
+export async function fetchQuote({ origin, destination, size = '53' }) {
+  console.log('[softmodal] fetchQuote', { origin, destination, size });
+
+  const dqs = dtdParams({ origin, destination, size });
+
+  const [dtdText, truck] = await Promise.all([
+    authedText(`/rates/dtd?${dqs}`).catch((e) => {
+      console.error('[softmodal] DTD error:', e.message);
+      return '';
+    }),
+    fetchTruckRate({ origin, destination, size }),
+  ]);
+
   const items = parseStreamedDTD(dtdText);
   const providers = items.map(formatProvider).sort((a, b) => {
-    // Sort: rates first (ascending), then no-rate entries
     if (a.available && !b.available) return -1;
     if (!a.available && b.available) return 1;
     return (a.rate ?? Infinity) - (b.rate ?? Infinity);
   });
 
-  const lowestIntermodal = providers.find((p) => p.available)?.rate ?? null;
-  const truck = extractTruckRate(truckData);
+  const intermodal = providers.find((p) => p.available)?.rate ?? null;
 
-  console.log('[softmodal] result:', { intermodal: lowestIntermodal, truck, providerCount: providers.length });
+  console.log('[softmodal] result:', { intermodal, truck, providerCount: providers.length });
 
-  return {
-    origin,
-    destination,
-    size,
-    intermodal: lowestIntermodal,
-    truck,
-    providers,
-  };
+  return { origin, destination, size, intermodal, truck, providers };
 }
