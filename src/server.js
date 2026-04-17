@@ -13,11 +13,19 @@ if (!SHARED_TOKEN || SHARED_TOKEN === 'off') {
   );
 }
 
-// ── Auth middleware ─────────────────────────────────────────────────────────
-function requireToken(req, res, next) {
-  // Skip auth if token is unset or explicitly disabled
-  if (!SHARED_TOKEN || SHARED_TOKEN === 'off') return next();
+// ── CORS ─────────────────────────────────────────────────────────────────────
+// Required so Lovable (and any browser app) can call this API directly.
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-proxy-token');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
+// ── Auth middleware ───────────────────────────────────────────────────────────
+function requireToken(req, res, next) {
+  if (!SHARED_TOKEN || SHARED_TOKEN === 'off') return next();
   const provided = req.header('x-proxy-token');
   if (provided !== SHARED_TOKEN) {
     return res.status(401).json({ error: 'Invalid or missing x-proxy-token header' });
@@ -25,7 +33,7 @@ function requireToken(req, res, next) {
   next();
 }
 
-// ── Routes ──────────────────────────────────────────────────────────────────
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
 app.get('/quote', requireToken, async (req, res) => {
@@ -48,7 +56,7 @@ app.get('/quote', requireToken, async (req, res) => {
   }
 });
 
-// ── Start ───────────────────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`[server] softmodal-proxy listening on :${PORT}`);
 });
