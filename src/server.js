@@ -1,33 +1,29 @@
-import express from 'express';
-import { fetchQuote } from './softmodal.js';
+// src/server.js
+
+import express from "express";
+import { fetchQuote } from "./softmodal.js";
 
 const app = express();
 
-app.get('/quote', async (req, res) => {
+app.get("/quote", async (req, res) => {
   try {
     const { origin, destination, size } = req.query;
 
-    const data = await fetchQuote({
-      origin,
-      destination,
-      size,
-    });
+    console.log("Incoming request:", req.query);
+
+    const data = await fetchQuote({ origin, destination, size });
 
     res.json(data);
-  } catch (err) {
-    console.error('FULL ERROR:', err);
 
+  } catch (err) {
+    console.error("SERVER ERROR:", err);
     res.status(500).json({
       error: err.message,
-      stack: err.stack,
+      stack: err.stack
     });
   }
 });
 
-app.get('/', (req, res) => {
-  res.send('Server is running');
-});
-
 app.listen(3000, () => {
-  console.log('Server running');
+  console.log("Server running");
 });
