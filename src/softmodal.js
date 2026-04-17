@@ -1,130 +1,66 @@
+import fetch from 'node-fetch';
 import { getSessionCookie } from './auth.js';
 
 const BASE = 'https://readonly.softmodal.com';
 
-// ✅ Format "Chicago, IL" → "Chicago IL to Atlanta GA"
-function formatLane(origin, destination) {
-  function clean(loc) {
-    return (loc || '')
-      .replace(',', '')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  return `${clean(origin)} to ${clean(destination)}`;
+function extractCSRF(html) {
+  const match = html.match(/name="authenticity_token" value="([^"]+)"/);
+  if (!match) return null;
+  return match[1];
 }
 
-// ✅ Build URL safely
-function buildUrl(path, params) {
-  const url = new URL(`${BASE}${path}`);
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.set(key, value);
+export async function fetchQuote({ origin, destination, size }) {
+  try {
+    // STEP 1 — Load login page
+    const loginPage = await fetch(`${BASE}/sessions/login`);
+    const html = await loginPage.text();
+
+    const csrf = extractCSRF(html);
+    if (!csrf) {
+      throw new Error('CSRF token not found');
     }
-  });
-  return url;
-}
 
-// ✅ Safe fetch wrapper
-async function softmodalFetch(path, params, session) {
-  const url = buildUrl(path, params);
+    // STEP 2 — Login
+    const loginRes = await fetch(`${BASE}/sessions/login`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        email: process.env.SOFTMODAL_EMAIL,
+        password: process.env.SOFTMODAL_PASSWORD,
+        authenticity_token: csrf,
+      }),
+      redirect: 'manual',
+    });
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Cookie: session.cookie,
-      'X-CSRF-Token': session.csrf,
-      'User-Agent': 'Mozilla/5.0',
-      Accept: 'application/json',
-    },
-  });
+    const cookies = loginRes.headers.get('set-cookie');
+    if (!cookies) {
+      throw new Error('Login failed — no cookie returned');
+    }
 
-  if (!res.ok) {
-    throw new Error(`${path} failed (${res.status})`);
+    const sessionCookie = cookies.split(';')[0];
+
+    // STEP 3 — Fetch quote page
+    const query = `${origin} to ${destination}`;
+
+    const res = await fetch(`${BASE}/`, {
+      headers: {
+        cookie: sessionCookie,
+      },
+    });
+
+    const page = await res.text();
+
+    // TODO: parse actual quote (for now return raw page)
+    return {
+      success: true,
+      debug: page.slice(0, 500),
+    };
+
+  } catch (err) {
+    return {
+      error: err.message,
+    };
   }
-
-  return res.json();
-}
-
-// 🚀 MAIN FUNCTION
-export async function fetchQuote({
-  origin,
-  destination,
-  size = 53,
-}) {
-  const session = await getSessionCookie();
-
-  // 🔥 Prevent crash if auth failed
-  if (!session || !session.cookie || !session.csrf) {
-    throw new Error('Invalid session (missing cookie or CSRF)');
-  }
-
-  const lane = formatLane(origin, destination);
-
-  const params = {
-    origin: lane,
-    size,
-    truck_mode: 'van',
-  };
-
-  let intermodal = null;
-  let truck = null;
-  let providers = [];
-  const debug = {};
-
-  await Promise.all([
-    // 🚂 INTERMODAL
-    softmodalFetch('/intermodal', params, session)
-      .then((data) => {
-        intermodal =
-          data?.rate ||
-          data?.price ||
-          data?.total ||
-          null;
-      })
-      .catch((e) => {
-        debug.intermodalError = e.message;
-      }),
-
-    // 🚛 TRUCK
-    softmodalFetch('/truck', params, session)
-      .then((data) => {
-        truck =
-          data?.rate ||
-          data?.price ||
-          data?.total ||
-          null;
-      })
-      .catch((e) => {
-        debug.truckError = e.message;
-      }),
-
-    // 📊 PROVIDERS (DTD)
-    softmodalFetch('/rates/dtd', params, session)
-      .then((data) => {
-        const list = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.results)
-          ? data.results
-          : [];
-
-        providers = list.map((p) => ({
-          name: p.provider || p.name || 'Unknown',
-          price:
-            p.price ||
-            p.rate ||
-            (p.min && p.max ? `${p.min}-${p.max}` : null),
-        }));
-      })
-      .catch((e) => {
-        debug.dtdError = e.message;
-      }),
-  ]);
-
-  return {
-    intermodal,
-    truck,
-    providers,
-    _debug: Object.keys(debug).length ? debug : undefined,
-  };
 }
