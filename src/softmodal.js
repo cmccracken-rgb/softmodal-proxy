@@ -51,6 +51,10 @@ export async function getSoftmodalQuote({
 }) {
   const session = await getSessionCookie();
 
+if (!session || !session.cookie) {
+  throw new Error('Invalid session from auth.js');
+}
+
   const lane = formatLane(origin, destination);
 
   const baseParams = {
