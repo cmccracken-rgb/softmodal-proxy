@@ -1,120 +1,111 @@
-import { getSessionCookie, invalidateSession } from './auth.js';
+import { getSessionCookie } from './auth.js';
 
-const BASE_URL = process.env.SOFTMODAL_BASE_URL || 'https://softmodal.com';
+const BASE = 'https://readonly.softmodal.com';
 
-const COMMON_HEADERS = {
-  accept: 'application/json',
-  'user-agent':
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-};
+// 🧠 Normalize input → "City ST to City ST"
+function formatLane(origin, destination) {
+  function clean(loc) {
+    return loc.replace(',', '').trim();
+  }
 
-async function authedFetch(path, { retried = false } = {}) {
-  const cookie = await getSessionCookie();
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { ...COMMON_HEADERS, cookie },
+  return `${clean(origin)} to ${clean(destination)}`;
+}
+
+// 🔧 Build URL with params
+function buildUrl(path, params) {
+  const url = new URL(`${BASE}${path}`);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null) {
+      url.searchParams.set(k, v);
+    }
+  });
+  return url;
+}
+
+// 🚀 Core fetch helper
+async function softmodalFetch(path, params, session) {
+  const url = buildUrl(path, params);
+
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Cookie': session.cookie,
+      'X-CSRF-Token': session.csrf,
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+    },
   });
 
-  if ((res.status === 401 || res.status === 403) && !retried) {
-    invalidateSession();
-    return authedFetch(path, { retried: true });
-  }
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Softmodal ${path} ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`Softmodal ${path} failed (${res.status})`);
   }
+
   return res.json();
 }
 
-function buildLaneQuery({ origin, destination, size }) {
-  const params = new URLSearchParams({
-    origin,
-    destination,
-    size: String(size),
+// 🎯 Main quote function
+export async function getSoftmodalQuote({
+  origin,
+  destination,
+  size = 53,
+}) {
+  const session = await getSessionCookie();
+
+  const lane = formatLane(origin, destination);
+
+  const baseParams = {
+    origin: lane,
+    size,
     truck_mode: 'van',
-    tarps: 'false',
-  });
-  return params.toString();
-}
+  };
 
-function safeJsonParse(value) {
-  if (typeof value !== 'string') return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+  let intermodal = null;
+  let truck = null;
+  let providers = [];
+  const debug = {};
 
-function parseProvider(item) {
-  if (!item || item.error) return null;
-  const name = item?.vendor?.name;
-  const baseRate = typeof item?.total === 'number' ? item.total : Number(item?.total);
-  if (!name) return null;
+  // 🔥 Run all in parallel
+  await Promise.all([
+    // 🚂 Intermodal
+    softmodalFetch('/intermodal', baseParams, session)
+      .then((data) => {
+        intermodal = data?.rate || data?.price || null;
+      })
+      .catch((e) => {
+        debug.intermodalError = e.message;
+      }),
 
-  // Loup Logistics — actual is a JSON string array
-  if (/loup/i.test(name)) {
-    const parsed = safeJsonParse(item.actual);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const amounts = parsed
-        .map((p) => Number(p?.totalPrice?.amount))
-        .filter((n) => Number.isFinite(n));
-      if (amounts.length > 0) {
-        const min = Math.min(...amounts);
-        const max = Math.max(...amounts);
-        return {
-          name,
-          rate: Number.isFinite(baseRate) ? baseRate : min,
-          range: { min, max },
-        };
-      }
-    }
-  }
+    // 🚛 Truck
+    softmodalFetch('/truck', baseParams, session)
+      .then((data) => {
+        truck = data?.rate || data?.price || null;
+      })
+      .catch((e) => {
+        debug.truckError = e.message;
+      }),
 
-  // CSX RailPlus — actual is a JSON string object
-  if (/csx/i.test(name) && /rail\s*plus/i.test(name)) {
-    const parsed = safeJsonParse(item.actual);
-    const price = Number(parsed?.Price);
-    if (Number.isFinite(price)) {
-      return {
-        name,
-        rate: Number.isFinite(baseRate) ? baseRate : price,
-        range: null,
-      };
-    }
-  }
-
-  if (!Number.isFinite(baseRate)) return null;
-  return { name, rate: baseRate, range: null };
-}
-
-export async function fetchQuote({ origin, destination, size }) {
-  const qs = buildLaneQuery({ origin, destination, size });
-
-  const [intermodalRes, truckRes, dtdRes] = await Promise.all([
-    authedFetch(`/intermodal?${qs}`).catch((e) => ({ __error: e.message })),
-    authedFetch(`/truck?${qs}`).catch((e) => ({ __error: e.message })),
-    authedFetch(`/rates/dtd?origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(destination)}&size=${encodeURIComponent(size)}`).catch((e) => ({ __error: e.message })),
+    // 📊 Providers (DTD)
+    softmodalFetch('/rates/dtd', baseParams, session)
+      .then((data) => {
+        if (Array.isArray(data)) {
+          providers = data.map((p) => ({
+            name: p.provider || p.name,
+            price:
+              p.price ||
+              p.rate ||
+              (p.min && p.max ? `${p.min}-${p.max}` : null),
+          }));
+        }
+      })
+      .catch((e) => {
+        debug.dtdError = e.message;
+      }),
   ]);
-
-  const intermodal =
-    Number(intermodalRes?.rates?.[0]?.total) ||
-    null;
-  const truck = Number(truckRes?.rate) || null;
-
-  const results = Array.isArray(dtdRes?.results) ? dtdRes.results : [];
-  const providers = results
-    .map(parseProvider)
-    .filter(Boolean)
-    .sort((a, b) => a.rate - b.rate);
 
   return {
     intermodal,
     truck,
     providers,
-    _debug: {
-      intermodalError: intermodalRes?.__error || null,
-      truckError: truckRes?.__error || null,
-      dtdError: dtdRes?.__error || null,
-    },
+    _debug: Object.keys(debug).length ? debug : undefined,
   };
 }
