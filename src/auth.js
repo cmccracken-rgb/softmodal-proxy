@@ -1,5 +1,3 @@
-import fetch from 'node-fetch';
-
 const LOGIN_URL =
   process.env.SOFTMODAL_LOGIN_URL ||
   'https://readonly.softmodal.com/sessions/login';
