@@ -6,8 +6,8 @@ const LOGIN_URL =
 
 const COOKIE_TTL_MS = 25 * 60 * 1000; // ~25 minutes
 
-// Updated selectors based on real Softmodal login page
 const LOGIN_SELECTORS = {
+  openLogin: 'text=Log in', // button that reveals form
   email: '#email',
   password: '#password',
   submit: 'button[type="submit"]',
@@ -35,26 +35,27 @@ async function loginAndExtractCookie() {
 
     const page = await context.newPage();
 
-    // Go to login page
     await page.goto(LOGIN_URL, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
 
-    // Wait for form to actually exist
+    // 🔑 CLICK "Log in" TO REVEAL FORM
+    await page.click(LOGIN_SELECTORS.openLogin).catch(() => {});
+
+    // wait for form to appear
     await page.waitForSelector(LOGIN_SELECTORS.email, { timeout: 10000 });
 
-    // Fill login form
+    // fill form
     await page.fill(LOGIN_SELECTORS.email, email);
     await page.fill(LOGIN_SELECTORS.password, password);
 
-    // Submit + wait for navigation
+    // submit
     await Promise.all([
       page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {}),
       page.click(LOGIN_SELECTORS.submit),
     ]);
 
-    // Give cookie time to be set
     await page.waitForTimeout(2000);
 
     const cookies = await context.cookies();
