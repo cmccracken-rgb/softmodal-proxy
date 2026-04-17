@@ -58,9 +58,10 @@ export async function fetchQuote({ origin, destination, size }) {
 
   console.log('STATUS:', res.status);
 
-  if (!res.ok) {
-    throw new Error(`Softmodal HTTP ${res.status}: ${text.slice(0, 300)}`);
-  }
+ if (!res.ok) {
+  console.log('FULL RESPONSE TEXT:', text);
+  throw new Error(`Softmodal HTTP ${res.status}`);
+}
 
   try {
     return JSON.parse(text);
