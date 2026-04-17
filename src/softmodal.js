@@ -1,4 +1,3 @@
-import fetch from 'node-fetch';
 import { getSessionCookie } from './auth.js';
 
 const BASE = 'https://readonly.softmodal.com';
