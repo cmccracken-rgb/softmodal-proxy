@@ -1,13 +1,19 @@
-const BASE_URL = 'https://softmodal.com';
+const SOFTMODAL_URL = 'https://readonly.softmodal.com/rates/dtd';
 
-function buildParams({ origin, destination, size }) {
-  return new URLSearchParams({
-    request_id: Math.random().toString(36).slice(2, 8),
+export async function fetchQuote({ origin, destination, size }) {
+  const cookie = process.env.SOFTMODAL_COOKIE;
+
+  if (!cookie) {
+    throw new Error('Missing SOFTMODAL_COOKIE env variable');
+  }
+
+  const params = new URLSearchParams({
+    request_id: Math.random().toString(36).substring(2, 10),
     truck_mode: 'van',
     tarps: 'false',
     dray_date: '18',
     hybrid_rates: '0',
-    valid: new Date().toISOString().slice(0, 10),
+    valid: new Date().toISOString().split('T')[0],
     restricted: 'false',
     o_stay: 'true',
     o_drop: 'true',
@@ -31,53 +37,34 @@ function buildParams({ origin, destination, size }) {
     s28: '',
     origin,
     destination,
-    size: String(size ?? 53),
+    size,
     _: Date.now().toString(),
   });
-}
 
-function cleanCookie(raw) {
-  if (!raw) return '';
-  // remove URL-encoded newlines and any actual newlines
-  return raw.replace(/%0A/gi, '').replace(/\r?\n/g, '').trim();
-}
+  const url = `${SOFTMODAL_URL}?${params.toString()}`;
 
-export async function fetchQuote({ origin, destination, size = 53 }) {
-  if (!origin || !destination) {
-    throw new Error('origin and destination are required');
-  }
-
-  const rawCookie = process.env.SOFTMODAL_COOKIE;
-  const cookie = cleanCookie(rawCookie);
-
-  if (!cookie || !cookie.startsWith('rack.session=')) {
-    throw new Error('Invalid or missing SOFTMODAL_COOKIE (must start with rack.session=...)');
-  }
-
-  const url = `${BASE_URL}/rates/dtd?${buildParams({ origin, destination, size }).toString()}`;
+  console.log('REQUEST URL:', url);
 
   const res = await fetch(url, {
-    method: 'GET',
     headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
-      Accept: '*/*',
-      Referer: 'https://softmodal.com/dist/',
-      Cookie: cookie,
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': '*/*',
+      'Referer': 'https://readonly.softmodal.com/',
+      'Cookie': cookie,
     },
   });
 
-  // Capture body once (for both error + success)
   const text = await res.text();
 
+  console.log('STATUS:', res.status);
+
   if (!res.ok) {
-    throw new Error(`Softmodal error ${res.status}: ${text}`);
+    throw new Error(`Softmodal HTTP ${res.status}: ${text.slice(0, 300)}`);
   }
 
   try {
     return JSON.parse(text);
-  } catch (e) {
-    // Sometimes APIs return HTML on auth failure — surface it clearly
-    throw new Error(`Invalid JSON from Softmodal: ${text.slice(0, 300)}`);
+  } catch {
+    throw new Error(`Invalid JSON (likely logged out): ${text.slice(0, 300)}`);
   }
 }
