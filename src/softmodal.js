@@ -1,48 +1,57 @@
-import { getSessionCookie } from './auth.js';
-
 const BASE = 'https://readonly.softmodal.com';
 
-function extractCSRF(html) {
-  const match = html.match(/name="authenticity_token" value="([^"]+)"/);
-  if (!match) return null;
-  return match[1];
+// Extract ALL hidden + visible form fields
+function extractHiddenFields(html) {
+  const inputs = [...html.matchAll(/<input[^>]+>/g)];
+  const fields = {};
+
+  for (const input of inputs) {
+    const nameMatch = input[0].match(/name="([^"]+)"/);
+    const valueMatch = input[0].match(/value="([^"]*)"/);
+
+    if (nameMatch) {
+      fields[nameMatch[1]] = valueMatch ? valueMatch[1] : '';
+    }
+  }
+
+  return fields;
 }
 
 export async function fetchQuote({ origin, destination, size }) {
   try {
-    // STEP 1 — Load login page
+    // STEP 1 — Load login page (to get hidden fields)
     const loginPage = await fetch(`${BASE}/sessions/login`);
     const html = await loginPage.text();
 
-    const csrf = extractCSRF(html);
-    if (!csrf) {
-      throw new Error('CSRF token not found');
+    const fields = extractHiddenFields(html);
+
+    if (!fields) {
+      throw new Error('Could not extract login fields');
     }
 
-    // STEP 2 — Login
+    // STEP 2 — Add credentials
+    fields.email = process.env.SOFTMODAL_EMAIL;
+    fields.password = process.env.SOFTMODAL_PASSWORD;
+
+    // STEP 3 — Login request
     const loginRes = await fetch(`${BASE}/sessions/login`, {
       method: 'POST',
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({
-        email: process.env.SOFTMODAL_EMAIL,
-        password: process.env.SOFTMODAL_PASSWORD,
-        authenticity_token: csrf,
-      }),
+      body: new URLSearchParams(fields),
       redirect: 'manual',
     });
 
-    const cookies = loginRes.headers.get('set-cookie');
-    if (!cookies) {
-      throw new Error('Login failed — no cookie returned');
+    const setCookie = loginRes.headers.get('set-cookie');
+
+    if (!setCookie) {
+      throw new Error('Login failed — no session cookie returned');
     }
 
-    const sessionCookie = cookies.split(';')[0];
+    const sessionCookie = setCookie.split(';')[0];
 
-    // STEP 3 — Fetch quote page
-    const query = `${origin} to ${destination}`;
-
+    // STEP 4 — Go to main app page (logged in)
     const res = await fetch(`${BASE}/`, {
       headers: {
         cookie: sessionCookie,
@@ -51,10 +60,9 @@ export async function fetchQuote({ origin, destination, size }) {
 
     const page = await res.text();
 
-    // TODO: parse actual quote (for now return raw page)
     return {
       success: true,
-      debug: page.slice(0, 500),
+      debug: page.slice(0, 1000), // show first part of page
     };
 
   } catch (err) {
