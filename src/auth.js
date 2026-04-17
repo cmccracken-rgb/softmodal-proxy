@@ -1,97 +1,63 @@
-const BASE = 'https://readonly.softmodal.com';
-const LOGIN_URL = `${BASE}/sessions/login`;
+import { chromium } from 'playwright';
 
-const COOKIE_TTL_MS = 25 * 60 * 1000;
+const LOGIN_URL =
+  process.env.SOFTMODAL_LOGIN_URL ||
+  'https://readonly.softmodal.com/sessions/login';
 
-let cachedCookie = null;
-let cachedAt = 0;
-let inFlight = null;
-
-function extractCookies(headers) {
-  const setCookie = headers.get('set-cookie');
-  if (!setCookie) return [];
-
-  // split multiple cookies safely
-  return setCookie.split(/,(?=[^;]+=[^;]+)/);
-}
-
-async function loginAndExtractCookie() {
+export async function getSessionCookie() {
   const email = process.env.SOFTMODAL_EMAIL;
   const password = process.env.SOFTMODAL_PASSWORD;
 
   if (!email || !password) {
-    throw new Error('Missing credentials');
+    throw new Error('Missing Softmodal credentials');
   }
 
-  // 1️⃣ GET login page
-  const res = await fetch(LOGIN_URL, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-    },
-  });
+  const browser = await chromium.launch({ headless: true });
 
-  const html = await res.text();
-  const cookies = extractCookies(res.headers);
-  const cookieHeader = cookies.map(c => c.split(';')[0]).join('; ');
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
 
-  // 2️⃣ Extract CSRF
-  const csrfMatch = html.match(/name="authenticity_token" value="([^"]+)"/);
-  if (!csrfMatch) {
-    throw new Error('CSRF token not found');
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+
+    // 🧹 CLOSE POPUP IF EXISTS
+    try {
+      await page.click('text=Subscribe', { timeout: 2000 });
+    } catch {}
+    await page.keyboard.press('Escape').catch(() => {});
+
+    // 🔥 CLICK LOG IN BUTTON
+    await page.waitForSelector('text=LOG IN', { timeout: 10000 });
+    await page.click('text=LOG IN');
+
+    // ✅ WAIT FOR VISIBLE INPUTS
+    await page.waitForSelector('input[name="email"]:visible', {
+      timeout: 10000,
+    });
+
+    // ✍️ FILL FORM
+    await page.fill('input[name="email"]:visible', email);
+    await page.fill('input[name="password"]:visible', password);
+
+    // 🚀 SUBMIT
+    await page.click('button[type="submit"]');
+
+    // ⏳ WAIT FOR COOKIE (RETRY LOOP)
+    let session = null;
+
+    for (let i = 0; i < 10; i++) {
+      const cookies = await context.cookies();
+      session = cookies.find((c) => c.name === 'rack.session');
+      if (session) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (!session) {
+      throw new Error('Failed to get rack.session cookie');
+    }
+
+    return `rack.session=${session.value}`;
+  } finally {
+    await browser.close();
   }
-
-  const csrf = csrfMatch[1];
-
-  // 3️⃣ POST login
-  const body = new URLSearchParams({
-    email,
-    password,
-    authenticity_token: csrf,
-  });
-
-  const loginRes = await fetch(LOGIN_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Cookie': cookieHeader,
-      'User-Agent': 'Mozilla/5.0',
-      'Origin': BASE,
-      'Referer': LOGIN_URL,
-    },
-    body,
-    redirect: 'manual',
-  });
-
-  const loginCookies = extractCookies(loginRes.headers);
-  const session = loginCookies.find(c => c.startsWith('rack.session='));
-
-  if (!session) {
-    throw new Error('Login failed — no rack.session cookie');
-  }
-
-  return session.split(';')[0];
-}
-
-export async function getSessionCookie({ forceRefresh = false } = {}) {
-  const fresh = cachedCookie && Date.now() - cachedAt < COOKIE_TTL_MS;
-  if (!forceRefresh && fresh) return cachedCookie;
-
-  if (!inFlight) {
-    inFlight = loginAndExtractCookie()
-      .then((cookie) => {
-        cachedCookie = cookie;
-        cachedAt = Date.now();
-        return cookie;
-      })
-      .finally(() => {
-        inFlight = null;
-      });
-  }
-
-  return inFlight;
-}
-
-export function invalidateSession() {
-  cachedCookie = null;
-  cachedAt = 0;
 }
