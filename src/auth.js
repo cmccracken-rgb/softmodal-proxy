@@ -152,7 +152,7 @@ export async function getSessionCookie() {
 }
 
 /** Force the next call to re-authenticate (call after a 401/403). */
-export function invalidateCookie() {
+export function invalidateSession() {
   cachedCookie = null;
   cachedAt = 0;
 }
