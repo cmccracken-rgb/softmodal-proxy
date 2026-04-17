@@ -2,48 +2,51 @@ import { getSessionCookie } from './auth.js';
 
 const BASE = 'https://readonly.softmodal.com';
 
-// 🧠 Normalize input → "City ST to City ST"
+// ✅ Format "Chicago, IL" → "Chicago IL to Atlanta GA"
 function formatLane(origin, destination) {
   function clean(loc) {
-    return loc.replace(',', '').trim();
+    return (loc || '')
+      .replace(',', '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 
   return `${clean(origin)} to ${clean(destination)}`;
 }
 
-// 🔧 Build URL with params
+// ✅ Build URL safely
 function buildUrl(path, params) {
   const url = new URL(`${BASE}${path}`);
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null) {
-      url.searchParams.set(k, v);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, value);
     }
   });
   return url;
 }
 
-// 🚀 Core fetch helper
+// ✅ Safe fetch wrapper
 async function softmodalFetch(path, params, session) {
   const url = buildUrl(path, params);
 
   const res = await fetch(url, {
     method: 'GET',
     headers: {
-      'Cookie': session.cookie,
+      Cookie: session.cookie,
       'X-CSRF-Token': session.csrf,
       'User-Agent': 'Mozilla/5.0',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     },
   });
 
   if (!res.ok) {
-    throw new Error(`Softmodal ${path} failed (${res.status})`);
+    throw new Error(`${path} failed (${res.status})`);
   }
 
   return res.json();
 }
 
-// 🎯 Main quote function
+// 🚀 MAIN FUNCTION
 export async function getSoftmodalQuote({
   origin,
   destination,
@@ -51,13 +54,14 @@ export async function getSoftmodalQuote({
 }) {
   const session = await getSessionCookie();
 
-if (!session || !session.cookie) {
-  throw new Error('Invalid session from auth.js');
-}
+  // 🔥 Prevent crash if auth failed
+  if (!session || !session.cookie || !session.csrf) {
+    throw new Error('Invalid session (missing cookie or CSRF)');
+  }
 
   const lane = formatLane(origin, destination);
 
-  const baseParams = {
+  const params = {
     origin: lane,
     size,
     truck_mode: 'van',
@@ -68,38 +72,49 @@ if (!session || !session.cookie) {
   let providers = [];
   const debug = {};
 
-  // 🔥 Run all in parallel
   await Promise.all([
-    // 🚂 Intermodal
-    softmodalFetch('/intermodal', baseParams, session)
+    // 🚂 INTERMODAL
+    softmodalFetch('/intermodal', params, session)
       .then((data) => {
-        intermodal = data?.rate || data?.price || null;
+        intermodal =
+          data?.rate ||
+          data?.price ||
+          data?.total ||
+          null;
       })
       .catch((e) => {
         debug.intermodalError = e.message;
       }),
 
-    // 🚛 Truck
-    softmodalFetch('/truck', baseParams, session)
+    // 🚛 TRUCK
+    softmodalFetch('/truck', params, session)
       .then((data) => {
-        truck = data?.rate || data?.price || null;
+        truck =
+          data?.rate ||
+          data?.price ||
+          data?.total ||
+          null;
       })
       .catch((e) => {
         debug.truckError = e.message;
       }),
 
-    // 📊 Providers (DTD)
-    softmodalFetch('/rates/dtd', baseParams, session)
+    // 📊 PROVIDERS (DTD)
+    softmodalFetch('/rates/dtd', params, session)
       .then((data) => {
-        if (Array.isArray(data)) {
-          providers = data.map((p) => ({
-            name: p.provider || p.name,
-            price:
-              p.price ||
-              p.rate ||
-              (p.min && p.max ? `${p.min}-${p.max}` : null),
-          }));
-        }
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.results)
+          ? data.results
+          : [];
+
+        providers = list.map((p) => ({
+          name: p.provider || p.name || 'Unknown',
+          price:
+            p.price ||
+            p.rate ||
+            (p.min && p.max ? `${p.min}-${p.max}` : null),
+        }));
       })
       .catch((e) => {
         debug.dtdError = e.message;
